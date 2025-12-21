@@ -1228,7 +1228,25 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
             BatchTracker.AddReceivedPokemon(originalTrainerID, received);
             string speciesImageUrl = TradeExtensions<PA9>.PokeImg(toSend, false, false);
             string savedPath = await PokemonImageHelper.DownloadAndSavePokemonImageAsync(speciesImageUrl);
-
+            if (!string.IsNullOrEmpty(savedPath) && File.Exists(savedPath))
+            {
+                try
+                {
+                    File.Delete(savedPath);
+                    Log($"临时文件 {savedPath} 已成功删除");
+                }
+                catch (IOException ex)
+                {
+                    // 处理文件占用异常，可选延迟重试
+                    Log($"删除临时文件失败，文件可能被占用：{ex.Message}");
+                    await Task.Delay(300, token).ConfigureAwait(false); // 短暂延迟
+                    if (File.Exists(savedPath))
+                    {
+                        File.Delete(savedPath);
+                        Log($"延迟后，临时文件 {savedPath} 已成功删除");
+                    }
+                }
+            }
             // Inject the next Pokemon for the next trade
             if (currentTradeIndex + 1 < totalBatchTrades)
             {
@@ -1433,6 +1451,7 @@ public static class PokemonImageHelper
         {
             // 释放图片资源，避免内存泄漏
             image.Dispose();
+
         }
     }
 }
