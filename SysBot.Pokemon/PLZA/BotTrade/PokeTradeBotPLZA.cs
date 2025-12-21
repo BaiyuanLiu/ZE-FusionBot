@@ -164,7 +164,7 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
             TradeState.Starting => "初始化...",
             // 优化：即使初始为0，后续赋值后刷新也能显示有效码
             TradeState.EnteringCode => _currentTradeCode != 0
-                ? $"交换码：{_currentTradeCode:0000 0000}"
+                ? $"输入交换码"
                 : "输入交换码",
             TradeState.WaitingForPartner => "搜索中",
             // 核心：_currentTradeDetail为null时，仅显示基础文本；非null时显示完整个性化提示
@@ -188,8 +188,6 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
         {
             fullMsgBuilder.AppendLine();
             fullMsgBuilder.AppendLine("====");
-            if (_currentTradeCode != 0 && _currentBatchNum == 1)
-                fullMsgBuilder.AppendLine($"码: {_currentTradeCode:0000 0000}");
             fullMsgBuilder.AppendLine($"【{_currentBatchNum}/{_totalBatchCount}】");
             fullMsgBuilder.AppendLine($"赠送精灵: {_currentPokemonNameZh}");
             fullMsgBuilder.AppendLine($"道具: {_currentHeldItemZh}");
@@ -1606,42 +1604,102 @@ public static class PokemonImageHelper
         }
         if (poke.Type == PokeTradeType.Random)
         {
-            // 1. 读取distribute文件夹的宝可梦 修改点 我仔细想随机批量赠送distribue文件里 所以才写的这个
             string distributeFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "distribute");
             var batchPokemon = LoadPokemonFromDistributeFolder(distributeFolder);
 
-            // 2. 如果有宝可梦，先随机抽取5个（不足5个则取全部）
+            // 提升变量作用域，解决上下文不存在问题
+            List<PA9> randomPokemonList = new List<PA9>();
+
+            // 日志：开始随机抽取流程
+            Log($"===== 开始宝可梦随机抽取流程 =====");
+            Log($"待抽取宝可梦总数（distribute文件夹）：{batchPokemon.Count}");
+            Log($"当前剩余未抽取宝可梦数量：{_remainingPokemon.Count}");
+
             if (batchPokemon.Count > 0)
             {
-                // 核心：随机抽取5个宝可梦
-                var random = new Random();
-                var randomPokemonList = batchPokemon
-                    .OrderBy(x => random.Next())
-                    .Take(5)
-                    .ToList();
+                lock (_lockObj)
+                {
+                    // 初始化/重置剩余抽取列表
+                    if (_remainingPokemon.Count == 0)
+                    {
+                        _remainingPokemon = new List<PA9>(batchPokemon);
+                        _drawnUniqueIds.Clear();
+                        // 日志：重置抽取池
+                        Log($"抽取池已重置，所有宝可梦恢复为未抽取状态，当前抽取池总数：{_remainingPokemon.Count}");
+                    }
 
-                // 给 BatchTrades 赋值后，会自动按批量执行
+                    // 随机抽取
+                    var random = new Random();
+                    int takeCount = Math.Min(5, _remainingPokemon.Count);
+                    randomPokemonList = _remainingPokemon
+                        .OrderBy(x => random.Next())
+                        .Take(takeCount)
+                        .ToList();
+
+                    // 日志：本次抽取基本信息
+                    Log($"本次计划抽取数量：{takeCount}，实际抽取数量：{randomPokemonList.Count}");
+
+                    // 遍历已抽取宝可梦，记录标识并移除
+                    for (int i = 0; i < randomPokemonList.Count; i++)
+                    {
+                        var selectedPokemon = randomPokemonList[i];
+                        string uniqueId = GenerateUniqueIdFromPokemon(selectedPokemon);
+
+                        // 详细日志：每只被抽取宝可梦的信息
+                        Log($"【第 {i + 1} 只被抽取宝可梦】");
+                        Log($" 物种ID：{selectedPokemon.Species}，唯一标识：{uniqueId}");
+ 
+
+                        if (!string.IsNullOrWhiteSpace(uniqueId))
+                        {
+                            bool isAdded = _drawnUniqueIds.Add(uniqueId);
+                            // 日志：标识添加结果（防止重复）
+                            Log($"  唯一标识是否成功加入已抽取集合：{isAdded}（已抽取标识总数：{_drawnUniqueIds.Count}）");
+
+                            // 移除已抽取宝可梦
+                            int removedCount = _remainingPokemon.RemoveAll(p => GenerateUniqueIdFromPokemon(p) == uniqueId);
+                            // 日志：移除结果
+                            Log($"  从剩余抽取池中移除该宝可梦，移除数量：{removedCount}，当前剩余未抽取数量：{_remainingPokemon.Count}");
+                        }
+                        else
+                        {
+                            Log($"  警告：该宝可梦唯一标识生成失败，未加入已抽取集合");
+                        }
+                    }
+                }
+
+                // 日志：抽取完成，赋值BatchTrades
+                Log($"本次随机抽取流程完成，已为 BatchTrades 赋值 {randomPokemonList.Count} 只宝可梦");
+
+                // 给 BatchTrades 赋值
                 var reflectProperty = poke.GetType().GetProperty("BatchTrades", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
                 if (reflectProperty != null && reflectProperty.CanWrite)
                 {
                     reflectProperty.SetValue(poke, randomPokemonList);
+                    Log($"通过属性反射为 BatchTrades 赋值成功");
                 }
                 else
                 {
-                    // 如果 BatchTrades 是字段（Field）
                     var reflectField = poke.GetType().GetField("BatchTrades", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
                     if (reflectField != null)
                     {
                         reflectField.SetValue(poke, randomPokemonList);
+                        Log($"通过字段反射为 BatchTrades 赋值成功");
+                    }
+                    else
+                    {
+                        Log($"警告：未找到 BatchTrades 属性或字段，赋值失败");
                     }
                 }
 
-                // 强制调用 Batch 交易逻辑（即使 Type 是 Random，你的代码会优先读 BatchTrades）
+                Log($"===== 宝可梦随机抽取流程结束 ====={Environment.NewLine}");
                 return await PerformBatchTrade(sav, poke, token).ConfigureAwait(false);
             }
-            // 无文件则走原 Random 逻辑
             else
             {
+                // 日志：无可用宝可梦文件
+                Log($"distribute文件夹中无有效宝可梦文件，将执行非批量交易逻辑");
+                Log($"===== 宝可梦随机抽取流程结束 ====={Environment.NewLine}");
                 return await PerformNonBatchTrade(sav, poke, token).ConfigureAwait(false);
             }
         }
@@ -2460,32 +2518,22 @@ public static class PokemonImageHelper
     }
     #region 辅助方法：读取Distribute文件夹宝可梦
     /// <summary>
-    /// 读取指定文件夹下的所有宝可梦文件，转为PA9列表（适配Random批量发送）
+    /// 原有方法：修复后确保返回 List<PA9>（原有逻辑不变，仅确认返回类型）
     /// </summary>
-    // 去掉 static 关键字 ↓
     private List<PA9> LoadPokemonFromDistributeFolder(string folderPath)
     {
-        var pokemonList = new List<PA9>();
+        var pokemonList = new List<PA9>(); // 确保返回类型为 PA9
         if (!Directory.Exists(folderPath))
         {
-            // 现在可以正常调用实例方法 Log 修改点 因要读取 所以才写
             Log($"Distribute文件夹不存在：{folderPath}");
             return pokemonList;
         }
 
-        // 支持的宝可梦文件后缀
         var extensions = new[] { ".pa9", ".pb7", ".pk8", ".pb8", ".pk7", ".pb7" };
         var files = Directory.GetFiles(folderPath)
             .Where(f => extensions.Contains(Path.GetExtension(f).ToLower()))
             .ToList();
 
-        if (files.Count == 0)
-        {
-            Log("Distribute文件夹中未找到宝可梦文件");
-            return pokemonList;
-        }
-
-        // 逐个读取文件并转为PA9
         foreach (var file in files)
         {
             try
@@ -2495,7 +2543,6 @@ public static class PokemonImageHelper
                 if (pk.Species != 0 && pk.ChecksumValid)
                 {
                     pokemonList.Add(pk);
-                    //    Log($"加载宝可梦文件：{Path.GetFileName(file)} - {(Species)pk.Species}");
                 }
                 else
                 {
@@ -2511,6 +2558,35 @@ public static class PokemonImageHelper
         return pokemonList;
     }
     #endregion
+    private List<PA9> _remainingPokemon = new List<PA9>(); // 替换 YourPokemonType 为 PA9
+    private static HashSet<string> _drawnUniqueIds = new HashSet<string>(); // 保留已抽取标识集合（无需修改，仅确认存在）
+    private static readonly object _lockObj = new object();
+    /// <summary>
+    /// 修复：将 Span<byte> 转换为 byte[]，生成宝可梦唯一标识
+    /// </summary>
+    /// <param name="pokemon">PA9 宝可梦实例</param>
+    /// <returns>唯一标识字符串</returns>
+    public string GenerateUniqueIdFromPokemon(PA9 pokemon)
+    {
+        if (pokemon == null)
+            throw new ArgumentNullException(nameof(pokemon));
+
+        // 解决 Span<byte> 转 byte[] 问题
+        byte[] pokemonBytes = pokemon.Data.ToArray();
+        string originalHexStr = string.Join(" ", pokemonBytes.Select(b => b.ToString("X2")));
+
+        var originalBytes = originalHexStr
+            .Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)
+            .ToList();
+        var validBytes = originalBytes.Where(b => b != "00").ToList();
+        validBytes.Reverse();
+        string uniqueId = string.Join("", validBytes);
+
+        // 可选：记录生成唯一标识的辅助日志（调试用，可注释）
+        //Log($"宝可梦物种ID：{pokemon.Species}）唯一标识生成完成：{uniqueId}");
+        return uniqueId;
+    }
+
     private Task WaitForQueueStep(int waitCounter, CancellationToken token)
     {
         if (waitCounter == 0)
