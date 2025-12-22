@@ -923,8 +923,9 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
                 allPokemonChineseNames.Add(zhSpecies);
 
                 // 下载并获取临时图路径
+                // 下载并获取整合后的临时图路径
                 string speciesImageUrl = TradeExtensions<PA9>.PokeImg(batchPokemon, false, false);
-                string tempImgPath = await PokemonImageHelper.DownloadAndSavePokemonImageAsync(speciesImageUrl);
+                string tempImgPath = await PokemonImageCompositeHelper.DownloadAndCompositePokemonImageAsync(batchPokemon, speciesImageUrl);
                 tempImageFilePaths.Add(tempImgPath);
             }
 
@@ -1227,7 +1228,8 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
 
             BatchTracker.AddReceivedPokemon(originalTrainerID, received);
             string speciesImageUrl = TradeExtensions<PA9>.PokeImg(toSend, false, false);
-            string savedPath = await PokemonImageHelper.DownloadAndSavePokemonImageAsync(speciesImageUrl);
+            // 替换为整合图像下载方法
+            string savedPath = await PokemonImageCompositeHelper.DownloadAndCompositePokemonImageAsync(toSend, speciesImageUrl);
             if (!string.IsNullOrEmpty(savedPath) && File.Exists(savedPath))
             {
                 try
@@ -1577,7 +1579,181 @@ public static class PokemonImageHelper
             });
         }
     }
+    public static class PokemonImageCompositeHelper
+    {
+        // 捕捉球和携带物精灵图CDN（贴合PLZA项目配置）
+        private const string BallSpriteBaseUrl = "https://raw.githubusercontent.com/hexbyt3/sprites/main/AltBallImg/20x20/{0}.png";
+        private const string ItemSpriteBaseUrl = "https://serebii.net/itemdex/sprites/{0}.png";
 
+        /// <summary>
+        /// 下载并整合宝可梦+捕捉球+携带物图像
+        /// </summary>
+        /// <param name="pk">宝可梦实体（PA9）</param>
+        /// <param name="speciesImageUrl">宝可梦物种图像URL（从TradeExtensions获取）</param>
+        /// <returns>整合后的临时图像路径</returns>
+        public static async Task<string> DownloadAndCompositePokemonImageAsync(PA9 pk, string speciesImageUrl)
+        {
+            using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+
+            // 1. 下载宝可梦基础图像
+            Image? pokemonImage = await LoadImageFromUrlAsync(httpClient, speciesImageUrl);
+            if (pokemonImage == null)
+            {
+                // 回退到仅下载宝可梦图像
+                return await PokemonImageHelper.DownloadAndSavePokemonImageAsync(speciesImageUrl);
+            }
+
+            try
+            {
+                // 2. 获取并格式化捕捉球信息
+                string ballName = GetBallName(pk);
+                string formattedBallName = FormatBallName(ballName);
+                Image? ballImage = await LoadImageFromUrlAsync(httpClient, string.Format(BallSpriteBaseUrl, formattedBallName));
+
+                // 3. 获取并格式化携带物信息（过滤无效携带物）
+                Image? itemImage = null;
+                if (pk.HeldItem > 0)
+                {
+                    string itemName = GetItemName(pk);
+                    string formattedItemName = FormatItemName(itemName);
+                    itemImage = await LoadImageFromUrlAsync(httpClient, string.Format(ItemSpriteBaseUrl, formattedItemName));
+                }
+
+                // 4. 分层绘制整合图像
+                using var compositeBitmap = new Bitmap(pokemonImage.Width, pokemonImage.Height, PixelFormat.Format32bppArgb);
+                using var graphics = Graphics.FromImage(compositeBitmap);
+
+                // 高质量绘制配置
+                graphics.Clear(Color.Transparent);
+                graphics.SmoothingMode = SmoothingMode.HighQuality;
+                graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                graphics.CompositingMode = CompositingMode.SourceOver;
+
+                // 底层：绘制宝可梦图像
+                graphics.DrawImage(pokemonImage, 0, 0, pokemonImage.Width, pokemonImage.Height);
+
+                // 中层：绘制携带物（左上角偏移3像素）
+                if (itemImage != null)
+                {
+                    int itemX = 3;
+                    int itemY = 3;
+                    // 防止超出画布
+                    if (itemX + itemImage.Width > compositeBitmap.Width) itemX = compositeBitmap.Width - itemImage.Width - 3;
+                    if (itemY + itemImage.Height > compositeBitmap.Height) itemY = compositeBitmap.Height - itemImage.Height - 3;
+                    graphics.DrawImage(itemImage, itemX, itemY, itemImage.Width, itemImage.Height);
+                }
+
+                // 上层：绘制捕捉球（右下角偏移3像素）
+                if (ballImage != null)
+                {
+                    int ballX = compositeBitmap.Width - ballImage.Width - 3;
+                    int ballY = compositeBitmap.Height - ballImage.Height - 3;
+                    // 防止超出画布
+                    if (ballX < 0) ballX = 3;
+                    if (ballY < 0) ballY = 3;
+                    graphics.DrawImage(ballImage, ballX, ballY, ballImage.Width, ballImage.Height);
+                }
+
+                // 5. 保存整合图像（与原有逻辑保持一致的路径和命名）
+                string imagesFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SavedImages");
+                Directory.CreateDirectory(imagesFolderPath);
+
+                // 唯一临时图（用于拼接）
+                string tempUniqueFileName = $"temp_pokemon_{Guid.NewGuid()}.png";
+                string tempFilePath = Path.Combine(imagesFolderPath, tempUniqueFileName);
+
+                // 固定单图（覆盖原有）
+                string fixedSingleFileName = "single_pokemon.png";
+                string fixedSingleFilePath = Path.Combine(imagesFolderPath, fixedSingleFileName);
+
+                compositeBitmap.Save(tempFilePath, ImageFormat.Png);
+                compositeBitmap.Save(fixedSingleFilePath, ImageFormat.Png);
+
+                // 释放额外资源
+                ballImage?.Dispose();
+                itemImage?.Dispose();
+
+                return tempFilePath;
+            }
+            finally
+            {
+                // 确保宝可梦图像资源释放
+                pokemonImage.Dispose();
+            }
+        }
+
+        #region 辅助方法
+        /// <summary>
+        /// 从URL加载图像（克隆脱离流依赖，避免文件锁定）
+        /// </summary>
+        private static async Task<Image?> LoadImageFromUrlAsync(HttpClient httpClient, string url)
+        {
+            try
+            {
+                using var response = await httpClient.GetAsync(url);
+                if (!response.IsSuccessStatusCode) return null;
+
+                await using var stream = await response.Content.ReadAsStreamAsync();
+                if (stream.Length == 0) return null;
+
+                using var tempImage = Image.FromStream(stream);
+                return (Image)tempImage.Clone();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 获取捕捉球名称
+        /// </summary>
+        private static string GetBallName(PA9 pk)
+        {
+            var strings = GameInfo.GetStrings("en");
+            return pk.Ball < strings.balllist.Length ? strings.balllist[pk.Ball] : "Poké Ball";
+        }
+
+        /// <summary>
+        /// 格式化捕捉球名称（适配CDN命名规则）
+        /// </summary>
+        private static string FormatBallName(string rawBallName)
+        {
+            if (string.IsNullOrWhiteSpace(rawBallName))
+                return "pokeball";
+
+            string formatted = rawBallName.ToLower().Replace(" ", "");
+            if (formatted.Contains("(la)"))
+                formatted = "la" + formatted.Replace("(la)", "");
+            return formatted;
+        }
+
+        /// <summary>
+        /// 获取携带物名称
+        /// </summary>
+        private static string GetItemName(PA9 pk)
+        {
+            var strings = GameInfo.GetStrings("en");
+            // 关键修正：将 strings.Item.Length 改为 strings.Item.Count
+            return pk.HeldItem > 0 && pk.HeldItem < strings.Item.Count ? strings.Item[pk.HeldItem] : string.Empty;
+        }
+
+        /// <summary>
+        /// 格式化携带物名称（适配CDN命名规则）
+        /// </summary>
+        private static string FormatItemName(string rawItemName)
+        {
+            return rawItemName.ToLower()
+                .Replace(" ", "")
+                .Replace("(", "")
+                .Replace(")", "")
+                .Replace("-", "")
+                .Replace("'", "")
+                .Replace(".", "");
+        }
+        #endregion
+    }
     private async Task<PokeTradeResult> PerformLinkCodeTrade(SAV9ZA sav, PokeTradeDetail<PA9> poke, CancellationToken token)
     {
         // Check if trade was canceled by user
