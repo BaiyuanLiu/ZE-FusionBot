@@ -44,16 +44,6 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
     private bool _wasConnectedToPartner = false;
     private int _consecutiveConnectionFailures = 0; // Track consecutive online connection failures for soft ban detection
 
-    // 批量交易动态信息字段（用于msg.txt生成，需初始化）修改点
-    private int _currentBatchNum = 0; // 当前交易序号（第N只）
-    private int _totalBatchCount = 0; // 批量交易总数量
-    private string _currentPokemonNameZh = string.Empty; // 当前赠送宝可梦中文名称
-    private string _currentHeldItemZh = string.Empty; // 当前宝可梦中文持有物
-    private int _currentTradeCode = 0; // 当前交易链接码
-    private bool _isBatchTrade = false; // 是否处于批量交易状态（用于区分普通/
-    // 新增：共享变量 - 存储当前交易详情和训练师NID（解决未定义错误）
-    private PokeTradeDetail<PA9>? _currentTradeDetail; // 对应原来的poke变量
-    private ulong _currentTrainerNID; // 对应原来的trainerNID变量（类型为ulong，与代码中一致）
     public event EventHandler<Exception>? ConnectionError;
 
     public event EventHandler? ConnectionSuccess;
@@ -74,6 +64,12 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
 
     private TradeState _tradeState = TradeState.Idle;
     private int _lastProgress = -1;
+    // 新增：仅保留核心状态字段（极简，满足消息拼接即可）
+    private int _currentTradeCode; // 当前交换码
+    private bool _isBatchTrade; // 是否批量交易
+    private int _currentBatchNum; // 当前批量序号
+    private int _totalBatchCount; // 批量总数
+    private string _currentPokemonNameZh = string.Empty; // 当前宝可梦中文名
 
     private void SetTradeState(TradeState newState)
     {
@@ -82,7 +78,6 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
 
         _tradeState = newState;
 
-        // 原有进度计算逻辑（保持不变，无需修改）修改点
         int progress = newState switch
         {
             TradeState.Idle => 0,
@@ -97,129 +92,12 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
             _ => _lastProgress
         };
 
+        // never regress unless explicitly resetting to Idle
         if (progress < _lastProgress && newState != TradeState.Idle)
             return;
 
         _lastProgress = progress;
         TradeProgressChanged?.Invoke(progress);
-
-        // 新增：调用msg.txt更新方法（核心整合点，原有代码添加这一行即可）
-        UpdateMsgTxtByTradeState(newState);
-    }
-    private void UpdateMsgTxtByTradeState(TradeState currentState)
-    {
-        // 1. 获取北京时间时区（保留原逻辑，保证时间精准）
-        TimeZoneInfo beijingTimeZone;
-        try
-        {
-            beijingTimeZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
-        }
-        catch
-        {
-            try
-            {
-                beijingTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Shanghai");
-            }
-            catch
-            {
-                beijingTimeZone = TimeZoneInfo.CreateCustomTimeZone("Beijing Time", TimeSpan.FromHours(8), "北京时间", "北京时间");
-            }
-        }
-
-        // 2. 初始化变量，准备拼接消息（全程做空值保护）
-        StringBuilder fullMsgBuilder = new StringBuilder();
-        string lastSeenTip = string.Empty;
-        string nextMeetTimeStr = string.Empty;
-        DateTime currentBeijingTime = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, beijingTimeZone);
-
-        // 3. 个性化信息拼接（做空值保护，_currentTradeDetail为null时不执行个性化逻辑）
-        if (_currentTradeDetail != null) // 此处仅为优化性能，非必须（可替换为三元表达式）
-        {
- 
-            TimeSpan delta = TimeSpan.Zero;
-            // 空值保护：使用?.判断_currentTradeDetail是否为null
-            var isDistribution = _currentTradeDetail?.Type == PokeTradeType.Random;
-            var list = isDistribution ? PreviousUsersDistribution : PreviousUsers;
-            // 空值保护：_currentTrainerNID若依赖_currentTradeDetail，需额外判断
-            var previous = list?.TryGetPreviousNID(_currentTrainerNID);
-            if (previous != null)
-            {
-                DateTime previousBeijingTime = TimeZoneInfo.ConvertTime(previous.Time, beijingTimeZone);
-                delta = currentBeijingTime - previousBeijingTime;
-                lastSeenTip = $"上次见到你{delta.TotalMinutes:F1}分钟之前";
-            }
-            else
-            {
-                lastSeenTip = "这是第一次见到你哦～";
-            }
-            var cd = AbuseSettings.TradeCooldown;
-            DateTime nextMeetTime = currentBeijingTime.AddMinutes(cd);
-            nextMeetTimeStr = nextMeetTime.ToString("yyyy-MM-dd HH:mm:ss");
-        }
- 
-        // 4. 基础状态提示（统一逻辑，无需if/else，自动兼容有无详情场景）
-        string baseMsg = currentState switch
-        {
-            TradeState.Idle => "等待交易...",
-            TradeState.Starting => "初始化...",
-            // 优化：即使初始为0，后续赋值后刷新也能显示有效码
-            TradeState.EnteringCode => _currentTradeCode != 0
-                ? $"输入交换码"
-                : "输入交换码",
-            TradeState.WaitingForPartner => "搜索中",
-            // 核心：_currentTradeDetail为null时，仅显示基础文本；非null时显示完整个性化提示
-            TradeState.PartnerFound => _currentTradeDetail != null
-                ? $"找到伙伴，加载信息...\r\n{lastSeenTip}\r\n下次见到你是北京时间：{nextMeetTimeStr}"
-                : "找到伙伴，加载信息...",
-            TradeState.Confirming => $"确认交换，验证中.",
-            TradeState.Trading => "交易中，请勿中断...",
-            TradeState.Completed => _currentTradeDetail != null && _isBatchTrade && _totalBatchCount > 0
-                ? $"【批量】第{_currentBatchNum}/{_totalBatchCount}只完成\r\n下次见到你是北京时间：\r\n{nextMeetTimeStr}"
-                : "交易完成，返回主界面...",
-            TradeState.Failed => _currentTradeDetail != null && _isBatchTrade
-                ? "【批量】交换失败，中止流程..."
-                : "交易失败，恢复初始状态...",
-            _ => "交易进行中..."
-        };
-
-        // 5. 批量交易补充信息（做空值保护，自动兼容）
-        fullMsgBuilder.Append(baseMsg);
-        if (_isBatchTrade && _totalBatchCount > 0 && _currentTradeDetail != null)
-        {
-            fullMsgBuilder.AppendLine();
-            fullMsgBuilder.AppendLine("====");
-            fullMsgBuilder.AppendLine($"【{_currentBatchNum}/{_totalBatchCount}】");
-            fullMsgBuilder.AppendLine($"赠送精灵: {_currentPokemonNameZh}");
-            fullMsgBuilder.AppendLine($"道具: {_currentHeldItemZh}");
-        }
-
-        // 6. 统一写入文件（仅一个写入入口，无任何if/else分支）
-        string finalMsg = fullMsgBuilder.ToString();
-        try
-        {
-            File.WriteAllText("msg.txt", finalMsg, Encoding.UTF8);
-            Log($"成功写入msg.txt，最终内容：\n{finalMsg}");
-        }
-        catch (IOException ex)
-        {
-            Log($"更新msg.txt失败：{ex.Message}");
-        }
-    }
-    /// <summary>
-    /// 重置批量交易动态字段（避免残留影响后续普通交易）
-    /// </summary>
-    private void ResetBatchMsgFields()
-    {
-        _currentBatchNum = 0;
-        _totalBatchCount = 0;
-        _currentPokemonNameZh = string.Empty;
-        _currentHeldItemZh = string.Empty;
-        _currentTradeCode = 0;
-        _isBatchTrade = false;
-
-        // 新增：重置共享变量，避免残留数据
-        _currentTradeDetail = null;
-        _currentTrainerNID = 0;
     }
 
     public ICountSettings Counts => TradeSettings;
@@ -262,6 +140,7 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
             RecentTrainerCache.SetRecentTrainer(sav);
             OnConnectionSuccess();
 
+            
             StartFromOverworld = true;
 
             Log("Initializing bot...");
@@ -366,7 +245,7 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
     {
         Log("Waiting to connect to user before initializing trade process...");
         SetTradeState(TradeState.WaitingForPartner);
-
+ 
         // Initial delay to let the game populate NID pointer in memory
         await Task.Delay(2_000, token).ConfigureAwait(false);
 
@@ -402,6 +281,8 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
                 continue; // Keep trying until pointer is valid
 
             Log("Trade partner detected!");
+            SetTradeState(TradeState.PartnerFound);
+ 
 
             _wasConnectedToPartner = true;
             TradePartnerStatusOffset = statusOffset;
@@ -537,6 +418,8 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
 
     private async Task<PokeTradeResult> ConfirmAndStartTrading(PokeTradeDetail<PA9> detail, uint checksumBeforeTrade, CancellationToken token)
     {
+ 
+
         var boxOffset = await GetBoxStartOffset(token).ConfigureAwait(false);
         var oldEC = await SwitchConnection.ReadBytesAbsoluteAsync(boxOffset, 8, token).ConfigureAwait(false);
 
@@ -569,6 +452,7 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
             if (!newEC.SequenceEqual(oldEC))
             {
                 Log("Trade started!");
+ 
                 SetTradeState(TradeState.Trading);
                 return PokeTradeResult.Success;
             }
@@ -647,6 +531,7 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
     {
         Log("Waiting for a user to begin trading...");
         SetTradeState(TradeState.Idle);
+ 
         while (!token.IsCancellationRequested && Config.NextRoutineType == PokeRoutineType.Idle)
             await Task.Delay(1_000, token).ConfigureAwait(false);
     }
@@ -684,7 +569,7 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
     {
         Log("Disconnecting from trade...");
         SetTradeState(TradeState.Failed);
-
+ 
         // Check if we're still in the trade box (connected) or kicked to menu
         var menuState = await GetMenuState(token).ConfigureAwait(false);
 
@@ -705,8 +590,7 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
     {
         if (unexpected)
             Log("Unexpected behavior, recovering to overworld.");
-        SetTradeState(TradeState.Failed);
-
+        SetTradeState(TradeState.Failed); 
         if (await CheckIfOnOverworld(token).ConfigureAwait(false))
         {
             StartFromOverworld = true;
@@ -907,10 +791,9 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
         var startingDetail = poke;
         var originalTrainerID = startingDetail.Trainer.ID;
 
+        var tradesToProcess = poke.BatchTrades ?? new List<PA9> { poke.TradeData };
+        int totalBatchTrades = tradesToProcess.Count;
 
-        var tradesToProcess = poke.BatchTrades ?? [poke.TradeData];
-        var totalBatchTrades = tradesToProcess.Count;
-        List<string> downloadedImagePaths = new List<string>();
         List<string> tempImageFilePaths = new List<string>();
 
         if (poke.Type == PokeTradeType.Random)
@@ -962,10 +845,6 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
                 }
             }
         }
-
-        var tradesToProcess = poke.BatchTrades ?? new List<PA9> { poke.TradeData };
-        int totalBatchTrades = tradesToProcess.Count;
-
         TradePartnerStatusPLZA? cachedTradePartnerInfo = null;
 
         void CleanupBatch(bool sendBackPokemon)
@@ -1000,54 +879,18 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
 
         try
         {
-
-            var currentTradeIndex = i;
-            var toSend = tradesToProcess[currentTradeIndex];
-            ulong boxOffset;
-            // ########### 新增1：当前批次交易开始前，切换为 PartnerFound 状态（表示已找到伙伴，准备当前批次交易）
-
-
-            await Task.Delay(100, token).ConfigureAwait(false); // 短暂延迟，确保状态更新生效
-
-            // 批量交易动态信息赋值（替换原有直接写入msg.txt的逻辑）修改点
-            var currentTradeNum = currentTradeIndex + 1;
-            var zhSpecies = ShowdownTranslator<PA9>.GameStringsZh.Species[toSend.Species];
-            var zhHeldItem = ShowdownTranslator<PA9>.GameStringsZh.Item[toSend.HeldItem];
-
-            // 1. 更新批量交易全局字段
-            _isBatchTrade = true; // 标记为批量交易状态
-            _currentBatchNum = currentTradeNum;
-            _totalBatchCount = totalBatchTrades;
-            _currentPokemonNameZh = zhSpecies;
-            _currentHeldItemZh = zhHeldItem;
-            // 仅第一只设置链接码（与你原有逻辑一致）
-            if (currentTradeIndex == 0)
-                _currentTradeCode = poke.Code;
-
-            // 2. 触发状态更新（可选，确保msg.txt即时刷新，也可依赖原有状态变更）
-            SetTradeState(_tradeState); // 重新触发当前状态，强制刷新msg.txt
-
-            //string speciesImageUrl = TradeExtensions<PA9>.PokeImg(toSend, false, false);
-            //string savedPath = await PokemonImageHelper.DownloadAndSavePokemonImageAsync(speciesImageUrl);
-
-            poke.TradeData = toSend;
-            poke.Notifier.UpdateBatchProgress(currentTradeIndex + 1, toSend, poke.UniqueTradeID);
-
-            // For subsequent trades (after first), we've already prepared the Pokemon during the previous trade animation
-            // No need to prepare here - just send notification
-            if (currentTradeIndex > 0)
-            {
-                poke.SendNotification(this, $"**Ready!** You can now offer your Pokémon for trade {currentTradeIndex + 1}/{totalBatchTrades}.");
-                await Task.Delay(2_000, token).ConfigureAwait(false);
-            }
-            SetTradeState(TradeState.Confirming); // 新增：确认交易前切换状态
-            await Task.Delay(100, token).ConfigureAwait(false);
-
             var retryCounts = new Dictionary<int, int>();
             for (int i = 0; i < totalBatchTrades; i++)
             {
                 poke.TradeData = tradesToProcess[i];
                 poke.Notifier.UpdateBatchProgress(i + 1, poke.TradeData, poke.UniqueTradeID);
+                // 新增：赋值批量交易状态 + 写入批量交易进度到 msg.txt
+                _isBatchTrade = true;
+                _currentBatchNum = i + 1;
+                _totalBatchCount = totalBatchTrades;
+                _currentPokemonNameZh = ShowdownTranslator<PA9>.GameStringsZh.Species[tradesToProcess[i].Species];
+                string batchMsg = $"【批量】第{_currentBatchNum}/{_totalBatchCount}只\n赠送精灵: {_currentPokemonNameZh}";
+                File.WriteAllText("msg.txt", batchMsg, Encoding.UTF8);
 
                 if (i > 0)
                 {
@@ -1062,93 +905,8 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
                     await Click(A, 500, token).ConfigureAwait(false);
                     await Click(A, 500, token).ConfigureAwait(false);
 
-
-                    await RecoverToOverworld(token).ConfigureAwait(false);
-                    return PokeTradeResult.NoTrainerFound;
-                }
-
-                if (partnerWaitResult == TradePartnerWaitResult.KickedToMenu)
-                {
-                    // Bot got kicked to menu - our fault, trigger requeue
-                    Log("Connection error. Retrying...");
-                    SetTradeState(TradeState.Failed);
-                    SendCollectedPokemonAndCleanup();
-                    await RecoverToOverworld(token).ConfigureAwait(false);
-                    return PokeTradeResult.RecoverStart;
-                }
-
-                Hub.Config.Stream.EndEnterCode(this);
-
-                // Wait until we're in the trade box
-                Log("Selecting Pokémon in B1S1 for trade.");
-
-
-                int boxCheckAttempts = 0;
-                while (!await IsOnMenu(MenuState.InBox, token).ConfigureAwait(false))
-                {
-                    await Task.Delay(500, token).ConfigureAwait(false);
-                    if (++boxCheckAttempts > 30) // 15 seconds max
-                    {
-                        Log("No trade partner found.");
-                        SetTradeState(TradeState.Failed);
-                        return PokeTradeResult.NoTrainerFound;
-                    }
-                }
-
-                // Wait for trade UI and partner data to load
-                await Task.Delay(2_000, token).ConfigureAwait(false);
-
-                // Now that data has loaded, read partner info
-                var tradePartnerFullInfo = await GetTradePartnerFullInfo(token).ConfigureAwait(false);
-                cachedTradePartnerInfo = tradePartnerFullInfo; // Cache for subsequent trades
-                var tradePartner = new TradePartnerPLZA(tradePartnerFullInfo);
-
-                var trainerNID = await GetTradePartnerNID(token).ConfigureAwait(false);
-                // 新增：为类成员变量赋值（关键步骤，让UpdateMsgTxtByTradeState能访问到）
-                this._currentTradeDetail = poke; // 存储当前交易详情（对应原来的poke）
-                this._currentTrainerNID = trainerNID; // 存储当前训练师NID（对应原来的trainerNID）
-
-                Log($"[TradePartner] OT: {tradePartner.TrainerName}, TID: {tradePartner.TID7}, SID: {tradePartner.SID7}, Gender: {tradePartnerFullInfo.Gender}, Language: {tradePartnerFullInfo.Language}, NID: {trainerNID}");
-
-
-                RecordUtil<PokeTradeBotPLZA>.Record($"Initiating\t{trainerNID:X16}\t{tradePartner.TrainerName}\t{poke.Trainer.TrainerName}\t{poke.Trainer.ID}\t{poke.ID}\t{toSend.EncryptionConstant:X8}");
-
-                poke.SendNotification(this, $"Found trade partner: {tradePartner.TrainerName}. **TID**: {tradePartner.TID7} **SID**: {tradePartner.SID7}");
-
-                var tradeCodeStorage = new TradeCodeStorage();
-                var existingTradeDetails = tradeCodeStorage.GetTradeDetails(poke.Trainer.ID);
-
-                bool shouldUpdateOT = existingTradeDetails?.OT != tradePartner.TrainerName;
-                bool shouldUpdateTID = existingTradeDetails?.TID != int.Parse(tradePartner.TID7);
-                bool shouldUpdateSID = existingTradeDetails?.SID != int.Parse(tradePartner.SID7);
-
-                if (shouldUpdateOT || shouldUpdateTID || shouldUpdateSID)
-                {
-                    string? ot = shouldUpdateOT ? tradePartner.TrainerName : existingTradeDetails?.OT;
-                    int? tid = shouldUpdateTID ? int.Parse(tradePartner.TID7) : existingTradeDetails?.TID;
-                    int? sid = shouldUpdateSID ? int.Parse(tradePartner.SID7) : existingTradeDetails?.SID;
-
-                    if (ot != null && tid.HasValue && sid.HasValue)
-                    {
-                        tradeCodeStorage.UpdateTradeDetails(poke.Trainer.ID, ot, tid.Value, sid.Value);
-                    }
-                }
-
-                var partnerCheck = CheckPartnerReputation(this, poke, trainerNID, tradePartner.TrainerName, AbuseSettings, token);
-                if (partnerCheck != PokeTradeResult.Success)
-                {
-                    poke.SendNotification(this, "Trade partner blocked. Canceling trades.");
-                    SendCollectedPokemonAndCleanup();
-                    var isDistribution = poke.Type == PokeTradeType.Random;
-                    var list = isDistribution ? PreviousUsersDistribution : PreviousUsers;
-                    var previous = list.TryGetPreviousNID(trainerNID);
-                    var cd = AbuseSettings.TradeCooldown;
-                    var delta = previous != null ? DateTime.Now - previous.Time : TimeSpan.Zero;
-                    File.WriteAllText("msg.txt", $"请自动退出\r\n上次见到你{delta.TotalMinutes:F1}分钟之前\r\n规则是{cd}分钟连接一次");//修改点 加入违反cd规则的
-
-
                     WaitAtBarrierIfApplicable(token);
-                  await Click(A, 1_000, token).ConfigureAwait(false);
+                    await Click(A, 1_000, token).ConfigureAwait(false);
 
                     poke.TradeSearching(this);
                     var waitResult = await WaitForTradePartner(token).ConfigureAwait(false);
@@ -1162,156 +920,10 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
                     if (waitResult == TradePartnerWaitResult.KickedToMenu)
                         return PokeTradeResult.RecoverStart;
 
-
-            // Read the partner's offered Pokemon BEFORE we start pressing A to confirm
-            // For subsequent trades (after first), give users more time to select their Pokemon
-            int readTimeout = currentTradeIndex == 0 ? 6_000 : 100_000; // 6s for first trade, 100s for subsequent trades 修改点 因我自己的测试20s不够 所以才加到100s
-            var offeredBatch = await ReadUntilPresentPointer(Offsets.LinkTradePartnerPokemonPointer, readTimeout, 0_500, BoxFormatSlotSize, token).ConfigureAwait(false);
-            if (offeredBatch == null || offeredBatch.Species == 0 || !offeredBatch.ChecksumValid)
-            {
-                Log($"Trade {currentTradeIndex + 1} ended because trainer offer was rescinded too quickly.");
-                SetTradeState(TradeState.Failed);
-                poke.SendNotification(this, $"Trade partner didn't offer a valid Pokémon for trade {currentTradeIndex + 1}. Canceling remaining trades.");
-                SendCollectedPokemonAndCleanup();
-                await DisconnectFromTrade(token).ConfigureAwait(false);
-                await ExitTradeToOverworld(false, token).ConfigureAwait(false);
-                return PokeTradeResult.TrainerOfferCanceledQuick;
-            }
-
-            // Check if the offered Pokemon will evolve upon trade BEFORE confirming
-            if (Hub.Config.Trade.TradeConfiguration.DisallowTradeEvolve && TradeEvolutions.WillTradeEvolve(offeredBatch.Species, offeredBatch.Form, offeredBatch.HeldItem, toSend.Species))
-            {
-                Log($"Trade {currentTradeIndex + 1} cancelled because trainer offered a Pokémon that would evolve upon trade.");
-                SetTradeState(TradeState.Failed);
-                poke.SendNotification(this, $"Trade cancelled for trade {currentTradeIndex + 1}. You cannot trade a Pokémon that will evolve. To prevent this, either give your Pokémon an Everstone to hold, or trade a different Pokémon.");
-                SendCollectedPokemonAndCleanup();
-                await DisconnectFromTrade(token).ConfigureAwait(false);
-                await ExitTradeToOverworld(false, token).ConfigureAwait(false);
-                return PokeTradeResult.TradeEvolveNotAllowed;
-            }
-
-            Log($"Confirming batch trade {currentTradeIndex + 1}/{totalBatchTrades}.");
-            SetTradeState(TradeState.Confirming);
-
-            var tradeResult = await ConfirmAndStartTrading(poke, checksumBeforeBatchTrade, token).ConfigureAwait(false);
-            if (tradeResult != PokeTradeResult.Success)
-            {
-                poke.SendNotification(this, $"Trade failed for trade {currentTradeIndex + 1}/{totalBatchTrades}. Canceling remaining trades.");
-                SendCollectedPokemonAndCleanup();
-                if (tradeResult == PokeTradeResult.TrainerTooSlow)
-                {
-                    await DisconnectFromTrade(token).ConfigureAwait(false);
-                }
-                await ExitTradeToOverworld(false, token).ConfigureAwait(false);
-                return tradeResult;
-            }
-            // 批量交易：交易动画启动，切换为Trading状态
-            SetTradeState(TradeState.Trading);
-            await Task.Delay(100, token).ConfigureAwait(false);
-            boxOffset = await GetBoxStartOffset(token).ConfigureAwait(false);
-            var received = await ReadPokemon(boxOffset, BoxFormatSlotSize, token).ConfigureAwait(false);
-            Log($"Trade {currentTradeIndex + 1} - received {(Species)received.Species}");
-            SetTradeState(TradeState.Confirming);
-
-            BatchTracker.AddReceivedPokemon(originalTrainerID, received);
-            string speciesImageUrl = TradeExtensions<PA9>.PokeImg(toSend, false, false);
-            // 替换为整合图像下载方法
-            string savedPath = await PokemonImageCompositeHelper.DownloadAndCompositePokemonImageAsync(toSend, speciesImageUrl);
-            if (!string.IsNullOrEmpty(savedPath) && File.Exists(savedPath))
-            {
-                try
-                {
-                    File.Delete(savedPath);
-                    Log($"临时文件 {savedPath} 已成功删除");
-                }
-                catch (IOException ex)
-                {
-                    // 处理文件占用异常，可选延迟重试
-                    Log($"删除临时文件失败，文件可能被占用：{ex.Message}");
-                    await Task.Delay(300, token).ConfigureAwait(false); // 短暂延迟
-                    if (File.Exists(savedPath))
-                    {
-                        File.Delete(savedPath);
-                        Log($"延迟后，临时文件 {savedPath} 已成功删除");
-                    }
-                }
-            }
-            // Inject the next Pokemon for the next trade
-            if (currentTradeIndex + 1 < totalBatchTrades)
-            {
-                var nextPokemon = tradesToProcess[currentTradeIndex + 1];
-
-                // Apply AutoOT if needed
-                if (Hub.Config.Legality.UseTradePartnerInfo && !poke.IgnoreAutoOT && cachedTradePartnerInfo != null)
-                {
-                    nextPokemon = await ApplyAutoOT(nextPokemon, cachedTradePartnerInfo, sav, token);
-                    tradesToProcess[currentTradeIndex + 1] = nextPokemon;
-                }
-                else
-                {
-                    // No AutoOT - inject directly
-                    boxOffset = await GetBoxStartOffset(token).ConfigureAwait(false);
-                    await SetBoxPokemonAbsolute(boxOffset, nextPokemon, token, sav).ConfigureAwait(false);
-                }
-                Log($"Next Pokemon ({currentTradeIndex + 2}/{totalBatchTrades}) injected into B1S1 during animation");
- 
-            }
-
-            if (token.IsCancellationRequested)
-            {
-                StartFromOverworld = true;
-                poke.SendNotification(this, "Canceling batch trades.");
-                SetTradeState(TradeState.Failed);
-                SendCollectedPokemonAndCleanup();
-                await ExitTradeToOverworld(false, token).ConfigureAwait(false);
-                return PokeTradeResult.RoutineCancel;
-            }
-
-            // Validate that we received a Pokemon during the animation
-            if (received == null || received.Species == 0)
-            {
-                Log($"Trade {currentTradeIndex + 1}/{totalBatchTrades} failed - no Pokemon was received.");
-                SetTradeState(TradeState.Failed);
-                poke.SendNotification(this, $"Trade {currentTradeIndex + 1}/{totalBatchTrades} was canceled. Canceling remaining trades.");
-                SendCollectedPokemonAndCleanup();
-                await DisconnectFromTrade(token).ConfigureAwait(false);
-                await ExitTradeToOverworld(false, token).ConfigureAwait(false);
-                return PokeTradeResult.TrainerTooSlow;
-            }
-
-            Log($"Trade {currentTradeIndex + 1}/{totalBatchTrades} complete! Received {(Species)received.Species}.");
-            SetTradeState(TradeState.Completed);
-
-            UpdateCountsAndExport(poke, received, toSend);
-
-            // Get the trainer NID and name for logging
-            var logTrainerNID = currentTradeIndex == 0 ? await GetTradePartnerNID(token).ConfigureAwait(false) : 0;
-            var logPartner = cachedTradePartnerInfo != null ? new TradePartnerPLZA(cachedTradePartnerInfo) : null;
-            LogSuccessfulTrades(poke, logTrainerNID, logPartner?.TrainerName ?? "Unknown");
-
-            completedTrades = currentTradeIndex + 1;
-
-            if (completedTrades == totalBatchTrades)
-            {
-                // Get all collected Pokemon before cleaning anything up
-                var allReceived = BatchTracker.GetReceivedPokemon(originalTrainerID);
-
-                // First send notification that trades are complete
-                poke.SendNotification(this, "All batch trades completed! Thank you for trading!");
-
-                // Send back all received Pokemon if ReturnPKMs is enabled
-                if (Hub.Config.Discord.ReturnPKMs && allReceived.Count > 0)
-                {
-                    poke.SendNotification(this, $"Here are the {allReceived.Count} Pokémon you traded to me:");
-
-                    // Send each Pokemon directly instead of calling TradeFinished
-                    for (int j = 0; j < allReceived.Count; j++)
-
                     Hub.Config.Stream.EndEnterCode(this);
 
                     int attempts = 0;
                     while (!await IsOnMenu(MenuState.InBox, token).ConfigureAwait(false))
-
                     {
                         if (++attempts > 30)
                             return PokeTradeResult.NoTrainerFound;
@@ -1427,7 +1039,29 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
 
                 BatchTracker.AddReceivedPokemon(originalTrainerID, received);
                 UpdateCountsAndExport(poke, received, poke.TradeData);
-
+                // ===================== 在这里插入你的代码（图像下载+临时文件删除） =====================
+                var currentToSend = tradesToProcess[i]; // 当前子交易发送的宝可梦
+                string speciesImageUrl = TradeExtensions<PA9>.PokeImg(currentToSend, false, false);
+                string savedPath = await PokemonImageCompositeHelper.DownloadAndCompositePokemonImageAsync(currentToSend, speciesImageUrl);
+                if (!string.IsNullOrEmpty(savedPath) && File.Exists(savedPath))
+                {
+                    try
+                    {
+                        File.Delete(savedPath);
+                        Log($"批量交易第{i + 1}笔：临时文件 {savedPath} 已成功删除");
+                    }
+                    catch (IOException ex)
+                    {
+                        Log($"批量交易第{i + 1}笔：删除临时文件失败，文件可能被占用：{ex.Message}");
+                        await Task.Delay(300, token).ConfigureAwait(false);
+                        if (File.Exists(savedPath))
+                        {
+                            File.Delete(savedPath);
+                            Log($"批量交易第{i + 1}笔：延迟后，临时文件 {savedPath} 已成功删除");
+                        }
+                    }
+                }
+                // ==============================================================
                 completedTrades++;
 
                 // Log animation wait message after each successful trade except the last
@@ -1435,7 +1069,7 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
                 {
                     Log($"Waiting for trade animation to finish before continuing to trade {i + 2}...");
                 }
-
+                
                 // Inject next Pokémon during animation
                 if (i + 1 < totalBatchTrades)
                 {
@@ -1461,6 +1095,7 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
                         sav).ConfigureAwait(false);
                 }
             }
+
 
             poke.SendNotification(this,
                 "All batch trades completed! Thank you for trading!");
@@ -1511,16 +1146,7 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
             await Task.Delay(250, token).ConfigureAwait(false);
         }
 
-
-        ResetBatchMsgFields();
-
-        // Ensure we exit properly even if the loop breaks unexpectedly
-        await ExitTradeToOverworld(false, token).ConfigureAwait(false);
-        poke.IsProcessing = false;
-        return PokeTradeResult.Success;
-
         return null;
-
     }
 
 
@@ -1530,6 +1156,7 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
 
     private async Task PerformTrade(SAV9ZA sav, PokeTradeDetail<PA9> detail, PokeRoutineType type, uint priority, CancellationToken token)
     {
+ 
         PokeTradeResult result;
         try
         {
@@ -1565,352 +1192,6 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
         }
     }
 
- 
-public static class PokemonImageHelper
-{
-    /// <summary>
-    /// 下载宝可梦图片（生成唯一临时图用于拼接，同时生成固定单图自动覆盖）
-    /// </summary>
-    /// <param name="speciesImageUrl">图片地址</param>
-    /// <returns>唯一临时图片路径（用于拼接）</returns>
-    public static async Task<string> DownloadAndSavePokemonImageAsync(string speciesImageUrl)
-    {
-        // 1. 下载图片数据流
-        using var httpClient = new HttpClient();
-        using var stream = await httpClient.GetStreamAsync(speciesImageUrl);
-
-        // 2. 加载图片（克隆脱离流依赖）
-        Image image = await Task.Run(() =>
-        {
-            using var tempImage = Image.FromStream(stream);
-            return (Image)tempImage.Clone();
-        });
-
-        try
-        {
-            // 3. 构建文件夹路径
-            string imagesFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SavedImages");
-            Directory.CreateDirectory(imagesFolderPath);
-
-            // 4. 生成唯一临时文件名（用于拼接，避免覆盖）
-            string tempUniqueFileName = $"temp_pokemon_{Guid.NewGuid()}.png";
-            string tempFilePath = Path.Combine(imagesFolderPath, tempUniqueFileName);
-
-            // 5. 保存唯一临时图（用于拼接所有不同精灵）
-            image.Save(tempFilePath, ImageFormat.Png);
-
-            // 6. 同时保存固定单图（覆盖上一个单图）
-            string fixedSingleFileName = "single_pokemon.png";
-            string fixedSingleFilePath = Path.Combine(imagesFolderPath, fixedSingleFileName);
-            image.Save(fixedSingleFilePath, ImageFormat.Png);
-
-            return tempFilePath; // 返回临时图路径，用于拼接
-        }
-        finally
-        {
-            // 释放图片资源，避免内存泄漏
-            image.Dispose();
-
-        }
-    }
-}
-    public static class PokemonImageMergeHelper
-    {
-        /// <summary>
-        /// 批量图片拼接（固定拼图文件名覆盖，拼接后清理临时单图）
-        /// </summary>
-        /// <param name="tempImageFilePaths">待拼接的唯一临时图片路径列表</param>
-        /// <param name="layoutType">拼接布局：Horizontal（横向）、Vertical（纵向）</param>
-        /// <param name="margin">图片之间的间距（像素）</param>
-        /// <returns>拼接后的大图本地路径</returns>
-        public static async Task<string> MergePokemonImagesAsync(List<string> tempImageFilePaths, string layoutType = "Horizontal", int margin = 10)
-        {
-            return await Task.Run(() =>
-            {
-                // 校验参数
-                if (tempImageFilePaths == null || !tempImageFilePaths.Any())
-                    throw new ArgumentException("待拼接的临时图片路径列表不能为空");
-
-                string imagesFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SavedImages");
-                Directory.CreateDirectory(imagesFolderPath);
-
-                List<Image> images = new List<Image>();
-                List<Size> imageSizes = new List<Size>();
-                try
-                {
-                    // 【最简核心修复】用MemoryStream加载图片，避免锁定原始文件
-                    foreach (var tempPath in tempImageFilePaths)
-                    {
-                        if (File.Exists(tempPath) && tempPath.Contains("temp_pokemon_"))
-                        {
-                            using (var fs = File.OpenRead(tempPath))
-                            {
-                                // 从流加载图片，不锁定原始文件
-                                Image img = Image.FromStream(fs);
-                                images.Add(img);
-                                imageSizes.Add(img.Size);
-                            }
-                        }
-                    }
-
-                    if (images.Count == 0)
-                        throw new FileNotFoundException("未找到有效的临时拼接图片");
-
-                    // 计算大图尺寸
-                    int bigImageWidth = 0;
-                    int bigImageHeight = 0;
-                    if (layoutType.Equals("Horizontal", StringComparison.OrdinalIgnoreCase))
-                    {
-                        bigImageHeight = imageSizes.Max(s => s.Height);
-                        bigImageWidth = imageSizes.Sum(s => s.Width) + margin * (images.Count - 1);
-                    }
-                    else if (layoutType.Equals("Vertical", StringComparison.OrdinalIgnoreCase))
-                    {
-                        bigImageWidth = imageSizes.Max(s => s.Width);
-                        bigImageHeight = imageSizes.Sum(s => s.Height) + margin * (images.Count - 1);
-                    }
-                    else
-                    {
-                        throw new NotSupportedException("仅支持Horizontal（横向）和Vertical（纵向）布局");
-                    }
-
-                    // 创建大图画布并绘制
-                    using Bitmap bigBitmap = new Bitmap(bigImageWidth, bigImageHeight);
-                    using Graphics g = Graphics.FromImage(bigBitmap);
-                    g.Clear(Color.White);
-                    g.SmoothingMode = SmoothingMode.HighQuality;
-                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-
-                    int currentX = 0;
-                    int currentY = 0;
-                    for (int i = 0; i < images.Count; i++)
-                    {
-                        Image img = images[i];
-                        Size imgSize = imageSizes[i];
-
-                        if (layoutType.Equals("Horizontal", StringComparison.OrdinalIgnoreCase))
-                        {
-                            int drawY = (bigImageHeight - imgSize.Height) / 2;
-                            g.DrawImage(img, currentX, drawY, imgSize.Width, imgSize.Height);
-                            currentX += imgSize.Width + margin;
-                        }
-                        else
-                        {
-                            int drawX = (bigImageWidth - imgSize.Width) / 2;
-                            g.DrawImage(img, drawX, currentY, imgSize.Width, imgSize.Height);
-                            currentY += imgSize.Height + margin;
-                        }
-                    }
-
-                    // 保存固定拼图（覆盖旧拼图）
-                    string fixedMergedFileName = "merged_pokemon.png";
-                    string mergedImagePath = Path.Combine(imagesFolderPath, fixedMergedFileName);
-                    bigBitmap.Save(mergedImagePath, ImageFormat.Png);
-
-                    return mergedImagePath;
-                }
-                finally
-                {
-                    // 1. 释放图片资源
-                    foreach (var img in images)
-                    {
-                        img?.Dispose();
-                    }
-
-                    // 2. 清理临时图片（此时文件已无锁定，可正常删除）
-                    foreach (var tempPath in tempImageFilePaths)
-                    {
-                        try
-                        {
-                            if (File.Exists(tempPath))
-                            {
-                                File.Delete(tempPath);
-                            }
-                        }
-                        catch
-                        {
-                            // 保留简易异常忽略，不影响核心流程
-                        }
-                    }
-                }
-            });
-        }
-    }
-    public static class PokemonImageCompositeHelper
-    {
-        // 捕捉球和携带物精灵图CDN（贴合PLZA项目配置）
-        private const string BallSpriteBaseUrl = "https://raw.githubusercontent.com/hexbyt3/sprites/main/AltBallImg/20x20/{0}.png";
-        private const string ItemSpriteBaseUrl = "https://serebii.net/itemdex/sprites/{0}.png";
-
-        /// <summary>
-        /// 下载并整合宝可梦+捕捉球+携带物图像
-        /// </summary>
-        /// <param name="pk">宝可梦实体（PA9）</param>
-        /// <param name="speciesImageUrl">宝可梦物种图像URL（从TradeExtensions获取）</param>
-        /// <returns>整合后的临时图像路径</returns>
-        public static async Task<string> DownloadAndCompositePokemonImageAsync(PA9 pk, string speciesImageUrl)
-        {
-            using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-
-            // 1. 下载宝可梦基础图像
-            Image? pokemonImage = await LoadImageFromUrlAsync(httpClient, speciesImageUrl);
-            if (pokemonImage == null)
-            {
-                // 回退到仅下载宝可梦图像
-                return await PokemonImageHelper.DownloadAndSavePokemonImageAsync(speciesImageUrl);
-            }
-
-            try
-            {
-                // 2. 获取并格式化捕捉球信息
-                string ballName = GetBallName(pk);
-                string formattedBallName = FormatBallName(ballName);
-                Image? ballImage = await LoadImageFromUrlAsync(httpClient, string.Format(BallSpriteBaseUrl, formattedBallName));
-
-                // 3. 获取并格式化携带物信息（过滤无效携带物）
-                Image? itemImage = null;
-                if (pk.HeldItem > 0)
-                {
-                    string itemName = GetItemName(pk);
-                    string formattedItemName = FormatItemName(itemName);
-                    itemImage = await LoadImageFromUrlAsync(httpClient, string.Format(ItemSpriteBaseUrl, formattedItemName));
-                }
-
-                // 4. 分层绘制整合图像
-                using var compositeBitmap = new Bitmap(pokemonImage.Width, pokemonImage.Height, PixelFormat.Format32bppArgb);
-                using var graphics = Graphics.FromImage(compositeBitmap);
-
-                // 高质量绘制配置
-                graphics.Clear(Color.Transparent);
-                graphics.SmoothingMode = SmoothingMode.HighQuality;
-                graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                graphics.CompositingMode = CompositingMode.SourceOver;
-
-                // 底层：绘制宝可梦图像
-                graphics.DrawImage(pokemonImage, 0, 0, pokemonImage.Width, pokemonImage.Height);
-
-                // 中层：绘制携带物（左上角偏移3像素）
-                if (itemImage != null)
-                {
-                    int itemX = 3;
-                    int itemY = 3;
-                    // 防止超出画布
-                    if (itemX + itemImage.Width > compositeBitmap.Width) itemX = compositeBitmap.Width - itemImage.Width - 3;
-                    if (itemY + itemImage.Height > compositeBitmap.Height) itemY = compositeBitmap.Height - itemImage.Height - 3;
-                    graphics.DrawImage(itemImage, itemX, itemY, itemImage.Width, itemImage.Height);
-                }
-
-                // 上层：绘制捕捉球（右下角偏移3像素）
-                if (ballImage != null)
-                {
-                    int ballX = compositeBitmap.Width - ballImage.Width - 3;
-                    int ballY = compositeBitmap.Height - ballImage.Height - 3;
-                    // 防止超出画布
-                    if (ballX < 0) ballX = 3;
-                    if (ballY < 0) ballY = 3;
-                    graphics.DrawImage(ballImage, ballX, ballY, ballImage.Width, ballImage.Height);
-                }
-
-                // 5. 保存整合图像（与原有逻辑保持一致的路径和命名）
-                string imagesFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SavedImages");
-                Directory.CreateDirectory(imagesFolderPath);
-
-                // 唯一临时图（用于拼接）
-                string tempUniqueFileName = $"temp_pokemon_{Guid.NewGuid()}.png";
-                string tempFilePath = Path.Combine(imagesFolderPath, tempUniqueFileName);
-
-                // 固定单图（覆盖原有）
-                string fixedSingleFileName = "single_pokemon.png";
-                string fixedSingleFilePath = Path.Combine(imagesFolderPath, fixedSingleFileName);
-
-                compositeBitmap.Save(tempFilePath, ImageFormat.Png);
-                compositeBitmap.Save(fixedSingleFilePath, ImageFormat.Png);
-
-                // 释放额外资源
-                ballImage?.Dispose();
-                itemImage?.Dispose();
-
-                return tempFilePath;
-            }
-            finally
-            {
-                // 确保宝可梦图像资源释放
-                pokemonImage.Dispose();
-            }
-        }
-
-        #region 辅助方法
-        /// <summary>
-        /// 从URL加载图像（克隆脱离流依赖，避免文件锁定）
-        /// </summary>
-        private static async Task<Image?> LoadImageFromUrlAsync(HttpClient httpClient, string url)
-        {
-            try
-            {
-                using var response = await httpClient.GetAsync(url);
-                if (!response.IsSuccessStatusCode) return null;
-
-                await using var stream = await response.Content.ReadAsStreamAsync();
-                if (stream.Length == 0) return null;
-
-                using var tempImage = Image.FromStream(stream);
-                return (Image)tempImage.Clone();
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// 获取捕捉球名称
-        /// </summary>
-        private static string GetBallName(PA9 pk)
-        {
-            var strings = GameInfo.GetStrings("en");
-            return pk.Ball < strings.balllist.Length ? strings.balllist[pk.Ball] : "Poké Ball";
-        }
-
-        /// <summary>
-        /// 格式化捕捉球名称（适配CDN命名规则）
-        /// </summary>
-        private static string FormatBallName(string rawBallName)
-        {
-            if (string.IsNullOrWhiteSpace(rawBallName))
-                return "pokeball";
-
-            string formatted = rawBallName.ToLower().Replace(" ", "");
-            if (formatted.Contains("(la)"))
-                formatted = "la" + formatted.Replace("(la)", "");
-            return formatted;
-        }
-
-        /// <summary>
-        /// 获取携带物名称
-        /// </summary>
-        private static string GetItemName(PA9 pk)
-        {
-            var strings = GameInfo.GetStrings("en");
-            // 关键修正：将 strings.Item.Length 改为 strings.Item.Count
-            return pk.HeldItem > 0 && pk.HeldItem < strings.Item.Count ? strings.Item[pk.HeldItem] : string.Empty;
-        }
-
-        /// <summary>
-        /// 格式化携带物名称（适配CDN命名规则）
-        /// </summary>
-        private static string FormatItemName(string rawItemName)
-        {
-            return rawItemName.ToLower()
-                .Replace(" ", "")
-                .Replace("(", "")
-                .Replace(")", "")
-                .Replace("-", "")
-                .Replace("'", "")
-                .Replace(".", "");
-        }
-        #endregion
-    }
     private async Task<PokeTradeResult> PerformLinkCodeTrade(SAV9ZA sav, PokeTradeDetail<PA9> poke, CancellationToken token)
     {
         // Check if trade was canceled by user
@@ -1982,7 +1263,7 @@ public static class PokemonImageHelper
 
                     // 随机抽取
                     var random = new Random();
-                    int takeCount = Math.Min(5, _remainingPokemon.Count);
+                    int takeCount = Math.Min(6, _remainingPokemon.Count);
                     randomPokemonList = _remainingPokemon
                         .OrderBy(x => random.Next())
                         .Take(takeCount)
@@ -2000,7 +1281,7 @@ public static class PokemonImageHelper
                         // 详细日志：每只被抽取宝可梦的信息
                         Log($"【第 {i + 1} 只被抽取宝可梦】");
                         Log($" 物种ID：{selectedPokemon.Species}，唯一标识：{uniqueId}");
- 
+
 
                         if (!string.IsNullOrWhiteSpace(uniqueId))
                         {
@@ -2055,7 +1336,6 @@ public static class PokemonImageHelper
                 return await PerformNonBatchTrade(sav, poke, token).ConfigureAwait(false);
             }
         }
-
         StartFromOverworld = false;
 
         // Route to appropriate trade handling based on trade type
@@ -2104,7 +1384,10 @@ public static class PokemonImageHelper
         {
             Hub.Config.Stream.StartEnterCode(this);
         }
-
+        // 新增：赋值交换码 + 写入“输入交换码”状态到 msg.txt
+        _currentTradeCode = code;
+        string enterCodeMsg = code != 0 ? $"输入交换码 {code:0000 0000}" : "输入交换码";
+        File.WriteAllText("msg.txt", enterCodeMsg, Encoding.UTF8);
         // PLZA saves the previous Link Code after the first trade.
         // If the pointer isn't valid, we haven't traded yet.
         var (valid, _) = await ValidatePointerAll(Offsets.LinkTradeCodePointer, token).ConfigureAwait(false);
@@ -2216,9 +1499,6 @@ public static class PokemonImageHelper
         var tradePartner = new TradePartnerPLZA(tradePartnerFullInfo);
 
         var trainerNID = await GetTradePartnerNID(token).ConfigureAwait(false);
-        // 新增：为类成员变量赋值（关键步骤，让UpdateMsgTxtByTradeState能访问到）
-        this._currentTradeDetail = poke; // 存储当前交易详情（对应原来的poke）
-        this._currentTrainerNID = trainerNID; // 存储当前训练师NID（对应原来的trainerNID）
 
         Log($"[TradePartner] OT: {tradePartner.TrainerName} | TID: {tradePartner.TID7} | SID: {tradePartner.SID7} | Gender: {TrainerDisplayHelper.GetGenderString(tradePartner.Gender)} | Language: {TrainerDisplayHelper.GetLanguageString(tradePartner.Language)} | NID: {trainerNID}");
 
@@ -2376,7 +1656,7 @@ public static class PokemonImageHelper
 
         Log($"Trade complete! Received {(Species)received.Species}. Now waiting for trade animation to complete...");
         SetTradeState(TradeState.Completed);
-
+ 
         poke.TradeFinished(this, received);
         UpdateCountsAndExport(poke, received, toSend);
         LogSuccessfulTrades(poke, trainerNID, tradePartner.TrainerName);
@@ -2414,7 +1694,6 @@ public static class PokemonImageHelper
         {
             HandleAbortedTrade(detail, type, priority, result);
         }
-        ResetBatchMsgFields();
     }
 
     private async Task<bool> RecoverToOverworld(CancellationToken token)
@@ -2868,6 +2147,352 @@ public static class PokemonImageHelper
         FailedBarrier++;
         Log($"Barrier sync timed out after {timeoutAfter} seconds. Continuing.");
     }
+    public static class PokemonImageMergeHelper
+    {
+        /// <summary>
+        /// 批量图片拼接（固定拼图文件名覆盖，拼接后清理临时单图）
+        /// </summary>
+        /// <param name="tempImageFilePaths">待拼接的唯一临时图片路径列表</param>
+        /// <param name="layoutType">拼接布局：Horizontal（横向）、Vertical（纵向）</param>
+        /// <param name="margin">图片之间的间距（像素）</param>
+        /// <returns>拼接后的大图本地路径</returns>
+        public static async Task<string> MergePokemonImagesAsync(List<string> tempImageFilePaths, string layoutType = "Horizontal", int margin = 10)
+        {
+            return await Task.Run(() =>
+            {
+                // 校验参数
+                if (tempImageFilePaths == null || !tempImageFilePaths.Any())
+                    throw new ArgumentException("待拼接的临时图片路径列表不能为空");
+
+                string imagesFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SavedImages");
+                Directory.CreateDirectory(imagesFolderPath);
+
+                List<Image> images = new List<Image>();
+                List<Size> imageSizes = new List<Size>();
+                try
+                {
+                    // 【最简核心修复】用MemoryStream加载图片，避免锁定原始文件
+                    foreach (var tempPath in tempImageFilePaths)
+                    {
+                        if (File.Exists(tempPath) && tempPath.Contains("temp_pokemon_"))
+                        {
+                            using (var fs = File.OpenRead(tempPath))
+                            {
+                                // 从流加载图片，不锁定原始文件
+                                Image img = Image.FromStream(fs);
+                                images.Add(img);
+                                imageSizes.Add(img.Size);
+                            }
+                        }
+                    }
+
+                    if (images.Count == 0)
+                        throw new FileNotFoundException("未找到有效的临时拼接图片");
+
+                    // 计算大图尺寸
+                    int bigImageWidth = 0;
+                    int bigImageHeight = 0;
+                    if (layoutType.Equals("Horizontal", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bigImageHeight = imageSizes.Max(s => s.Height);
+                        bigImageWidth = imageSizes.Sum(s => s.Width) + margin * (images.Count - 1);
+                    }
+                    else if (layoutType.Equals("Vertical", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bigImageWidth = imageSizes.Max(s => s.Width);
+                        bigImageHeight = imageSizes.Sum(s => s.Height) + margin * (images.Count - 1);
+                    }
+                    else
+                    {
+                        throw new NotSupportedException("仅支持Horizontal（横向）和Vertical（纵向）布局");
+                    }
+
+                    // 创建大图画布并绘制
+                    using Bitmap bigBitmap = new Bitmap(bigImageWidth, bigImageHeight);
+                    using Graphics g = Graphics.FromImage(bigBitmap);
+                    g.Clear(Color.White);
+                    g.SmoothingMode = SmoothingMode.HighQuality;
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+
+                    int currentX = 0;
+                    int currentY = 0;
+                    for (int i = 0; i < images.Count; i++)
+                    {
+                        Image img = images[i];
+                        Size imgSize = imageSizes[i];
+
+                        if (layoutType.Equals("Horizontal", StringComparison.OrdinalIgnoreCase))
+                        {
+                            int drawY = (bigImageHeight - imgSize.Height) / 2;
+                            g.DrawImage(img, currentX, drawY, imgSize.Width, imgSize.Height);
+                            currentX += imgSize.Width + margin;
+                        }
+                        else
+                        {
+                            int drawX = (bigImageWidth - imgSize.Width) / 2;
+                            g.DrawImage(img, drawX, currentY, imgSize.Width, imgSize.Height);
+                            currentY += imgSize.Height + margin;
+                        }
+                    }
+
+                    // 保存固定拼图（覆盖旧拼图）
+                    string fixedMergedFileName = "merged_pokemon.png";
+                    string mergedImagePath = Path.Combine(imagesFolderPath, fixedMergedFileName);
+                    bigBitmap.Save(mergedImagePath, ImageFormat.Png);
+
+                    return mergedImagePath;
+                }
+                finally
+                {
+                    // 1. 释放图片资源
+                    foreach (var img in images)
+                    {
+                        img?.Dispose();
+                    }
+
+                    // 2. 清理临时图片（此时文件已无锁定，可正常删除）
+                    foreach (var tempPath in tempImageFilePaths)
+                    {
+                        try
+                        {
+                            if (File.Exists(tempPath))
+                            {
+                                File.Delete(tempPath);
+                            }
+                        }
+                        catch
+                        {
+                            // 保留简易异常忽略，不影响核心流程
+                        }
+                    }
+                }
+            });
+        }
+    }
+    public static class PokemonImageHelper
+    {
+        /// <summary>
+        /// 下载宝可梦图片（生成唯一临时图用于拼接，同时生成固定单图自动覆盖）
+        /// </summary>
+        /// <param name="speciesImageUrl">图片地址</param>
+        /// <returns>唯一临时图片路径（用于拼接）</returns>
+        public static async Task<string> DownloadAndSavePokemonImageAsync(string speciesImageUrl)
+        {
+            // 1. 下载图片数据流
+            using var httpClient = new HttpClient();
+            using var stream = await httpClient.GetStreamAsync(speciesImageUrl);
+
+            // 2. 加载图片（克隆脱离流依赖）
+            Image image = await Task.Run(() =>
+            {
+                using var tempImage = Image.FromStream(stream);
+                return (Image)tempImage.Clone();
+            });
+
+            try
+            {
+                // 3. 构建文件夹路径
+                string imagesFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SavedImages");
+                Directory.CreateDirectory(imagesFolderPath);
+
+                // 4. 生成唯一临时文件名（用于拼接，避免覆盖）
+                string tempUniqueFileName = $"temp_pokemon_{Guid.NewGuid()}.png";
+                string tempFilePath = Path.Combine(imagesFolderPath, tempUniqueFileName);
+
+                // 5. 保存唯一临时图（用于拼接所有不同精灵）
+                image.Save(tempFilePath, ImageFormat.Png);
+
+                // 6. 同时保存固定单图（覆盖上一个单图）
+                string fixedSingleFileName = "single_pokemon.png";
+                string fixedSingleFilePath = Path.Combine(imagesFolderPath, fixedSingleFileName);
+                image.Save(fixedSingleFilePath, ImageFormat.Png);
+
+                return tempFilePath; // 返回临时图路径，用于拼接
+            }
+            finally
+            {
+                // 释放图片资源，避免内存泄漏
+                image.Dispose();
+
+            }
+        }
+    }
+    public static class PokemonImageCompositeHelper
+    {
+        // 捕捉球和携带物精灵图CDN（贴合PLZA项目配置）
+        private const string BallSpriteBaseUrl = "https://raw.githubusercontent.com/hexbyt3/sprites/main/AltBallImg/20x20/{0}.png";
+        private const string ItemSpriteBaseUrl = "https://serebii.net/itemdex/sprites/{0}.png";
+
+        /// <summary>
+        /// 下载并整合宝可梦+捕捉球+携带物图像
+        /// </summary>
+        /// <param name="pk">宝可梦实体（PA9）</param>
+        /// <param name="speciesImageUrl">宝可梦物种图像URL（从TradeExtensions获取）</param>
+        /// <returns>整合后的临时图像路径</returns>
+        public static async Task<string> DownloadAndCompositePokemonImageAsync(PA9 pk, string speciesImageUrl)
+        {
+            using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+
+            // 1. 下载宝可梦基础图像
+            Image? pokemonImage = await LoadImageFromUrlAsync(httpClient, speciesImageUrl);
+            if (pokemonImage == null)
+            {
+                // 回退到仅下载宝可梦图像
+                return await PokemonImageHelper.DownloadAndSavePokemonImageAsync(speciesImageUrl);
+            }
+
+            try
+            {
+                // 2. 获取并格式化捕捉球信息
+                string ballName = GetBallName(pk);
+                string formattedBallName = FormatBallName(ballName);
+                Image? ballImage = await LoadImageFromUrlAsync(httpClient, string.Format(BallSpriteBaseUrl, formattedBallName));
+
+                // 3. 获取并格式化携带物信息（过滤无效携带物）
+                Image? itemImage = null;
+                if (pk.HeldItem > 0)
+                {
+                    string itemName = GetItemName(pk);
+                    string formattedItemName = FormatItemName(itemName);
+                    itemImage = await LoadImageFromUrlAsync(httpClient, string.Format(ItemSpriteBaseUrl, formattedItemName));
+                }
+
+                // 4. 分层绘制整合图像
+                using var compositeBitmap = new Bitmap(pokemonImage.Width, pokemonImage.Height, PixelFormat.Format32bppArgb);
+                using var graphics = Graphics.FromImage(compositeBitmap);
+
+                // 高质量绘制配置
+                graphics.Clear(Color.Transparent);
+                graphics.SmoothingMode = SmoothingMode.HighQuality;
+                graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                graphics.CompositingMode = CompositingMode.SourceOver;
+
+                // 底层：绘制宝可梦图像
+                graphics.DrawImage(pokemonImage, 0, 0, pokemonImage.Width, pokemonImage.Height);
+
+                // 中层：绘制携带物（左上角偏移3像素）
+                if (itemImage != null)
+                {
+                    int itemX = 3;
+                    int itemY = 3;
+                    // 防止超出画布
+                    if (itemX + itemImage.Width > compositeBitmap.Width) itemX = compositeBitmap.Width - itemImage.Width - 3;
+                    if (itemY + itemImage.Height > compositeBitmap.Height) itemY = compositeBitmap.Height - itemImage.Height - 3;
+                    graphics.DrawImage(itemImage, itemX, itemY, itemImage.Width, itemImage.Height);
+                }
+
+                // 上层：绘制捕捉球（右下角偏移3像素）
+                if (ballImage != null)
+                {
+                    int ballX = compositeBitmap.Width - ballImage.Width - 3;
+                    int ballY = compositeBitmap.Height - ballImage.Height - 3;
+                    // 防止超出画布
+                    if (ballX < 0) ballX = 3;
+                    if (ballY < 0) ballY = 3;
+                    graphics.DrawImage(ballImage, ballX, ballY, ballImage.Width, ballImage.Height);
+                }
+
+                // 5. 保存整合图像（与原有逻辑保持一致的路径和命名）
+                string imagesFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SavedImages");
+                Directory.CreateDirectory(imagesFolderPath);
+
+                // 唯一临时图（用于拼接）
+                string tempUniqueFileName = $"temp_pokemon_{Guid.NewGuid()}.png";
+                string tempFilePath = Path.Combine(imagesFolderPath, tempUniqueFileName);
+
+                // 固定单图（覆盖原有）
+                string fixedSingleFileName = "single_pokemon.png";
+                string fixedSingleFilePath = Path.Combine(imagesFolderPath, fixedSingleFileName);
+
+                compositeBitmap.Save(tempFilePath, ImageFormat.Png);
+                compositeBitmap.Save(fixedSingleFilePath, ImageFormat.Png);
+
+                // 释放额外资源
+                ballImage?.Dispose();
+                itemImage?.Dispose();
+
+                return tempFilePath;
+            }
+            finally
+            {
+                // 确保宝可梦图像资源释放
+                pokemonImage.Dispose();
+            }
+        }
+
+        #region 辅助方法
+        /// <summary>
+        /// 从URL加载图像（克隆脱离流依赖，避免文件锁定）
+        /// </summary>
+        private static async Task<Image?> LoadImageFromUrlAsync(HttpClient httpClient, string url)
+        {
+            try
+            {
+                using var response = await httpClient.GetAsync(url);
+                if (!response.IsSuccessStatusCode) return null;
+
+                await using var stream = await response.Content.ReadAsStreamAsync();
+                if (stream.Length == 0) return null;
+
+                using var tempImage = Image.FromStream(stream);
+                return (Image)tempImage.Clone();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 获取捕捉球名称
+        /// </summary>
+        private static string GetBallName(PA9 pk)
+        {
+            var strings = GameInfo.GetStrings("en");
+            return pk.Ball < strings.balllist.Length ? strings.balllist[pk.Ball] : "Poké Ball";
+        }
+
+        /// <summary>
+        /// 格式化捕捉球名称（适配CDN命名规则）
+        /// </summary>
+        private static string FormatBallName(string rawBallName)
+        {
+            if (string.IsNullOrWhiteSpace(rawBallName))
+                return "pokeball";
+
+            string formatted = rawBallName.ToLower().Replace(" ", "");
+            if (formatted.Contains("(la)"))
+                formatted = "la" + formatted.Replace("(la)", "");
+            return formatted;
+        }
+
+        /// <summary>
+        /// 获取携带物名称
+        /// </summary>
+        private static string GetItemName(PA9 pk)
+        {
+            var strings = GameInfo.GetStrings("en");
+            // 关键修正：将 strings.Item.Length 改为 strings.Item.Count
+            return pk.HeldItem > 0 && pk.HeldItem < strings.Item.Count ? strings.Item[pk.HeldItem] : string.Empty;
+        }
+
+        /// <summary>
+        /// 格式化携带物名称（适配CDN命名规则）
+        /// </summary>
+        private static string FormatItemName(string rawItemName)
+        {
+            return rawItemName.ToLower()
+                .Replace(" ", "")
+                .Replace("(", "")
+                .Replace(")", "")
+                .Replace("-", "")
+                .Replace("'", "")
+                .Replace(".", "");
+        }
+        #endregion
+    }
+
     #region 辅助方法：读取Distribute文件夹宝可梦
     /// <summary>
     /// 原有方法：修复后确保返回 List<PA9>（原有逻辑不变，仅确认返回类型）
