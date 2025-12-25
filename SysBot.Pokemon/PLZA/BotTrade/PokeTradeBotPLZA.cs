@@ -1048,7 +1048,7 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
                     try
                     {
                         File.Delete(savedPath);
-                        Log($"批量交易第{i + 1}笔：临时文件 {savedPath} 已成功删除");
+ 
                     }
                     catch (IOException ex)
                     {
@@ -1261,9 +1261,9 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
                         Log($"抽取池已重置，所有宝可梦恢复为未抽取状态，当前抽取池总数：{_remainingPokemon.Count}");
                     }
 
-                    // 随机抽取
+                    // 随机抽取 这里的数字是用于每一次赠送是多少个
                     var random = new Random();
-                    int takeCount = Math.Min(6, _remainingPokemon.Count);
+                    int takeCount = Math.Min(15, _remainingPokemon.Count);
                     randomPokemonList = _remainingPokemon
                         .OrderBy(x => random.Next())
                         .Take(takeCount)
@@ -1279,8 +1279,8 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
                         string uniqueId = GenerateUniqueIdFromPokemon(selectedPokemon);
 
                         // 详细日志：每只被抽取宝可梦的信息
-                        Log($"【第 {i + 1} 只被抽取宝可梦】");
-                        Log($" 物种ID：{selectedPokemon.Species}，唯一标识：{uniqueId}");
+                        //Log($"【第 {i + 1} 只被抽取宝可梦】");
+                        //Log($" 物种ID：{selectedPokemon.Species}，唯一标识：{uniqueId}");
 
 
                         if (!string.IsNullOrWhiteSpace(uniqueId))
